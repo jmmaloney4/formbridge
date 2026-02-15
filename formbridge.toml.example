@@ -1,0 +1,64 @@
+# FormBridge Configuration Example
+# Copy this file to formbridge.toml and customize
+
+[llm]
+# LLM provider: "openai", "anthropic", or "local"
+provider = "openai"
+
+# Model name (provider-specific)
+# OpenAI: "gpt-4o-mini", "gpt-4o", "gpt-4-turbo"
+# Anthropic: "claude-3-5-sonnet-20241022", "claude-3-opus-20240229"
+model = "gpt-4o-mini"
+
+# API key environment variable name
+# The actual key should be set in your environment, not here
+api_key_env = "OPENAI_API_KEY"
+
+# Custom base URL (optional)
+# Useful for OpenAI-compatible APIs or proxies
+# base_url = ""
+
+# Request timeout in seconds
+# timeout = 120.0
+
+# For local models (Ollama, LM Studio, etc.)
+[llm.local]
+# Uncomment to use local models
+# provider = "local"
+# base_url = "http://localhost:11434/v1"
+# model = "llama3.1:8b"
+
+# Template settings
+[templates]
+# Directory for storing templates
+# Default: ~/.formbridge/templates/
+# dir = "~/.formbridge/templates"
+
+# Registry URL for community templates
+# registry = "https://raw.githubusercontent.com/nilsyai/formbridge-templates/main"
+
+# Scanner settings
+[scanner]
+# Prefer OCR even for forms with native fields
+# prefer_ocr = false
+
+# Minimum field size (width x height in points) to detect
+# min_field_size = 200
+
+# Parser settings
+[parser]
+# Enable instruction caching
+# use_cache = true
+
+# Cache directory
+# cache_dir = "~/.cache/formbridge"
+
+# Mapper settings
+[mapper]
+# Confidence threshold for auto-fill (0.0 - 1.0)
+# Fields below this will be flagged for review
+# auto_fill_threshold = 0.95
+
+# Confidence threshold for review (0.0 - 1.0)
+# Fields below this will be left blank
+# review_threshold = 0.80
