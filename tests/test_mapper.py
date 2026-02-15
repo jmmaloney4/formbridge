@@ -150,8 +150,8 @@ def sample_instruction_map() -> InstructionMap:
 def sample_user_data() -> dict[str, Any]:
     """Create sample user data."""
     return {
-        "name": "ROHU LLC",
-        "ein": "35-2930038",
+        "name": "Acme Partners LLC",
+        "ein": "82-1234567",
         "gross_receipts": 10000,
         "deductions": 2000,
         "start_date": "2023-03-15",
@@ -167,14 +167,14 @@ def llm_mapping_response() -> dict[str, Any]:
         "mappings": [
             {
                 "field_id": "field_001",
-                "value": "ROHU LLC",
+                "value": "Acme Partners LLC",
                 "confidence": 0.98,
                 "reasoning": "User data 'name' matches Line A for legal name",
                 "source_key": "name",
             },
             {
                 "field_id": "field_002",
-                "value": "35-2930038",
+                "value": "82-1234567",
                 "confidence": 0.99,
                 "reasoning": "EIN matches required format",
                 "source_key": "ein",
@@ -502,7 +502,7 @@ class TestDataToFieldMapper:
 
         # Check a specific mapping
         name_mapping = next(m for m in result if m.field_id == "field_001")
-        assert name_mapping.value == "ROHU LLC"
+        assert name_mapping.value == "Acme Partners LLC"
         assert name_mapping.confidence > 0.9
         assert name_mapping.source_key == "name"
 

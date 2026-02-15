@@ -98,11 +98,11 @@ def sample_mapping_result() -> FieldMappingResult:
     """Create a sample mapping result."""
     return FieldMappingResult(
         mappings=[
-            FieldMapping(field_id="field_001", value="ROHU LLC", confidence=0.95),
+            FieldMapping(field_id="field_001", value="Acme Partners LLC", confidence=0.95),
             FieldMapping(field_id="field_002", value="10000", confidence=0.98),
             FieldMapping(field_id="field_003", value="2023-03-15", confidence=0.92),
             FieldMapping(field_id="field_004", value="Yes", confidence=0.99),
-            FieldMapping(field_id="field_005", value="35-2930038", confidence=0.97),
+            FieldMapping(field_id="field_005", value="82-1234567", confidence=0.97),
         ],
         calculations=[],
         warnings=[],

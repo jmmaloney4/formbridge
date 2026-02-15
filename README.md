@@ -332,8 +332,8 @@ Form: IRS Form 1065 (2025)
 Fields: 45 mapped, 44 blank, 1 flagged
 
 Page 1:
-  ✅ Line A: Name ...................... "ROHU LLC" (conf: 0.99)
-  ✅ Line B: EIN ....................... "35-2930038" (conf: 0.99)
+  ✅ Line A: Name ...................... "Acme Partners LLC" (conf: 0.99)
+  ✅ Line B: EIN ....................... "82-1234567" (conf: 0.99)
   ⚠️  Line D: Date started .............. "03/15/2023" (conf: 0.78)
      └─ NOTE: Verify this is formation date, not filing date
 
