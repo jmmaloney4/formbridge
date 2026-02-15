@@ -300,6 +300,7 @@ def _display_instruction_table(instruction_map) -> None:
 @click.option("--data", "-d", type=click.Path(exists=True), required=True, help="JSON data file to fill form with")
 @click.option("--output", "-o", type=click.Path(), required=False, help="Output path for filled PDF")
 @click.option("--verify", is_flag=True, help="Interactive verification before writing")
+@click.option("--view", is_flag=True, help="Launch visual viewer after filling")
 @click.option("--dry-run", is_flag=True, help="Show mapping without writing PDF")
 @click.pass_context
 def fill_command(
@@ -308,6 +309,7 @@ def fill_command(
     data: str,
     output: str | None,
     verify: bool,
+    view: bool,
     dry_run: bool,
 ) -> None:
     """Fill a PDF form with data using AI-powered field mapping.
@@ -450,6 +452,24 @@ def fill_command(
             report_path = Path(output).with_suffix(".verification.json")
             report_path.write_text(report.model_dump_json(indent=2))
             console.print(f"[dim]Verification report saved to {report_path}[/]")
+
+            # Launch viewer if requested
+            if view:
+                console.print("\n[bold]Launching visual viewer...[/]")
+                from formbridge.viewer import run_viewer
+
+                # Save mapping to temp file for viewer
+                mapping_json_path = Path(output).with_suffix(".mapping.json")
+                mapping_json_path.write_text(mapping_result.model_dump_json(indent=2))
+
+                run_viewer(
+                    pdf_path=output,
+                    mapping_path=mapping_json_path,
+                    schema_path=None,  # Will be scanned from PDF
+                    original_pdf_path=actual_pdf_path,
+                    port=8765,
+                    open_browser=True,
+                )
         else:
             console.print("[yellow]⚠[/] No fields were filled")
             console.print("Check that your data keys match the form field names")
@@ -738,6 +758,102 @@ def verify_command(
             report_path.write_text(basic_report.model_dump_json(indent=2))
             console.print(f"\n[green]✓[/] Report saved to {report}")
 
+    except Exception as e:
+        console.print(f"[red]Error:[/] {e}")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
+# =============================================================================
+# View Command
+# =============================================================================
+
+
+@main.command("view")
+@click.argument("pdf_path", type=click.Path(exists=True))
+@click.option("--mapping", "-m", type=click.Path(exists=True), help="Field mapping JSON file")
+@click.option("--schema", "-s", type=click.Path(exists=True), help="Form schema JSON file")
+@click.option("--original", type=click.Path(exists=True), help="Original blank PDF (for re-filling after edits)")
+@click.option("--port", "-p", default=8765, help="Port to run viewer server on")
+@click.option("--no-browser", is_flag=True, help="Don't auto-open browser")
+@click.pass_context
+def view_command(
+    ctx: click.Context,
+    pdf_path: str,
+    mapping: str | None,
+    schema: str | None,
+    original: str | None,
+    port: int,
+    no_browser: bool,
+) -> None:
+    """Launch visual PDF viewer/editor.
+
+    Opens an interactive web UI where you can:
+    - See the PDF rendered with field overlays
+    - View color-coded confidence scores (green/yellow/red)
+    - Click fields to edit values
+    - See changes update live on the PDF
+    - Save the final PDF when satisfied
+
+    If --mapping is provided, shows confidence overlays for each field.
+    If no mapping, just shows the PDF with scanned field positions highlighted.
+
+    Examples:
+        # View a filled PDF with mapping
+        formbridge view filled.pdf --mapping mapping.json
+
+        # View a PDF with original form for re-filling
+        formbridge view filled.pdf --mapping mapping.json --original blank_form.pdf
+
+        # View without auto-opening browser
+        formbridge view filled.pdf --no-browser
+    """
+    verbose = ctx.obj.get("verbose", False)
+
+    try:
+        from formbridge.viewer import run_viewer
+
+        pdf_file = Path(pdf_path)
+
+        # Validate options
+        if mapping:
+            mapping_path = Path(mapping)
+            if not mapping_path.exists():
+                console.print(f"[red]Error:[/] Mapping file not found: {mapping}")
+                sys.exit(1)
+        else:
+            mapping_path = None
+
+        if schema:
+            schema_path = Path(schema)
+            if not schema_path.exists():
+                console.print(f"[red]Error:[/] Schema file not found: {schema}")
+                sys.exit(1)
+        else:
+            schema_path = None
+
+        if original:
+            original_path = Path(original)
+            if not original_path.exists():
+                console.print(f"[red]Error:[/] Original PDF not found: {original}")
+                sys.exit(1)
+        else:
+            original_path = None
+
+        # Run viewer
+        run_viewer(
+            pdf_path=pdf_file,
+            mapping_path=mapping_path,
+            schema_path=schema_path,
+            original_pdf_path=original_path,
+            port=port,
+            open_browser=not no_browser,
+        )
+
+    except ImportError as e:
+        console.print(f"[red]Error:[/] Viewer dependencies not available: {e}")
+        sys.exit(1)
     except Exception as e:
         console.print(f"[red]Error:[/] {e}")
         if verbose:
@@ -1115,6 +1231,406 @@ def serve(ctx: click.Context, port: int, stdio: bool) -> None:
         console.print()
         console.print("[dim]Press Ctrl+C to stop[/]")
         run_http(port=port)
+
+
+# =============================================================================
+# Import Commands
+# =============================================================================
+
+
+@main.group("import")
+def import_group() -> None:
+    """Import financial data from external sources.
+
+    Import data from banking and financial services APIs and generate
+    FormBridge-compatible JSON for tax form filling.
+
+    API tokens are read from environment variables:
+    - MERCURY_API_TOKEN for Mercury
+    - WISE_API_TOKEN for Wise
+
+    Examples:
+        formbridge import mercury --year 2025 --output tax-2025.json
+        formbridge import wise --profile 12345 --year 2025 --output wise-2025.json
+        formbridge import merge file1.json file2.json --output combined.json
+    """
+    pass
+
+
+@import_group.command("mercury")
+@click.option("--year", "-y", required=True, type=int, help="Tax year to import")
+@click.option("--account", "-a", "account_id", help="Specific account ID (imports all accounts if not specified)")
+@click.option("--entity-name", "-n", required=True, help="Entity name for tax forms")
+@click.option("--ein", help="Employer Identification Number")
+@click.option("--address", help="Street address")
+@click.option("--city", help="City")
+@click.option("--state", help="State")
+@click.option("--zip", "zip_code", help="ZIP code")
+@click.option("--entity-type", type=click.Choice(["corporation", "partnership", "sole_proprietorship"]), default="partnership", help="Entity type")
+@click.option("--accounting-method", type=click.Choice(["cash", "accrual"]), default="cash", help="Accounting method")
+@click.option("--business-activity", help="Description of business activity")
+@click.option("--business-code", help="NAICS business code")
+@click.option("--date-started", help="Date business started (YYYY-MM-DD)")
+@click.option("--output", "-o", required=True, type=click.Path(), help="Output JSON file path")
+@click.pass_context
+def import_mercury(
+    ctx: click.Context,
+    year: int,
+    account_id: str | None,
+    entity_name: str,
+    ein: str | None,
+    address: str | None,
+    city: str | None,
+    state: str | None,
+    zip_code: str | None,
+    entity_type: str,
+    accounting_method: str,
+    business_activity: str | None,
+    business_code: str | None,
+    date_started: str | None,
+    output: str,
+) -> None:
+    """Import financial data from Mercury.
+
+    Connects to the Mercury API and downloads transactions for the specified
+    year, then generates a FormBridge-compatible JSON file.
+
+    Requires MERCURY_API_TOKEN environment variable.
+
+    Example:
+        formbridge import mercury --year 2025 --entity-name "My Company LLC" \\
+            --ein 12-3456789 --address "123 Main St" --city "New York" \\
+            --state "NY" --zip "10001" --output mycompany-2025.json
+    """
+    verbose = ctx.obj.get("verbose", False)
+
+    try:
+        from formbridge.connectors import (
+            MercuryConnector,
+            EntityInfo,
+            ConnectorError,
+            AuthenticationError,
+        )
+
+        # Build entity info
+        entity_info = EntityInfo(
+            name=entity_name,
+            ein=ein,
+            address=address,
+            city=city,
+            state=state,
+            zip_code=zip_code,
+            entity_type=entity_type,
+            accounting_method=accounting_method,
+            business_activity=business_activity,
+            business_code=business_code,
+            date_business_started=date_started,
+        )
+
+        with console.status(f"[bold green]Connecting to Mercury API..."):
+            connector = MercuryConnector()
+
+        with console.status(f"[bold green]Fetching Mercury accounts..."):
+            accounts = connector.get_accounts()
+            console.print(f"[green]✓[/] Found {len(accounts)} account(s)")
+
+        with console.status(f"[bold green]Downloading transactions for {year}..."):
+            tax_data = connector.generate_tax_data(year, entity_info, account_id)
+
+        # Get summary info
+        meta = tax_data.get("_meta", {})
+        total_transactions = meta.get("total_transactions", 0)
+        income = tax_data.get("total_income", 0)
+        deductions = tax_data.get("total_deductions", 0)
+        net = tax_data.get("ordinary_income", 0)
+
+        # Write output
+        output_path = Path(output)
+        output_path.write_text(json.dumps(tax_data, indent=2))
+
+        console.print(f"[green]✓[/] Tax data exported to {output}")
+        console.print(f"  Year: {year}")
+        console.print(f"  Transactions: {total_transactions}")
+        console.print(f"  Total Income: ${income:,.2f}")
+        console.print(f"  Total Deductions: ${deductions:,.2f}")
+        console.print(f"  Net Income: ${net:,.2f}")
+
+    except AuthenticationError as e:
+        console.print(f"[red]Authentication error:[/] {e}")
+        console.print("\n[yellow]Set your Mercury API token:[/]")
+        console.print("  export MERCURY_API_TOKEN='your-api-token'")
+        sys.exit(1)
+    except ConnectorError as e:
+        console.print(f"[red]Connector error:[/] {e}")
+        sys.exit(1)
+    except ImportError:
+        console.print("[red]Error:[/] Mercury connector not available")
+        console.print("Install with: pip install formbridge[connectors]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/] {e}")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
+@import_group.command("wise")
+@click.option("--profile", "-p", "profile_id", required=False, type=int, help="Wise profile ID (uses first profile if not specified)")
+@click.option("--year", "-y", required=False, type=int, help="Tax year to import")
+@click.option("--currency", "-c", default="USD", help="Currency code (default: USD)")
+@click.option("--entity-name", "-n", required=False, help="Entity name for tax forms")
+@click.option("--ein", help="Employer Identification Number")
+@click.option("--address", help="Street address")
+@click.option("--city", help="City")
+@click.option("--state", help="State")
+@click.option("--zip", "zip_code", help="ZIP code")
+@click.option("--entity-type", type=click.Choice(["corporation", "partnership", "sole_proprietorship"]), default="partnership", help="Entity type")
+@click.option("--accounting-method", type=click.Choice(["cash", "accrual"]), default="cash", help="Accounting method")
+@click.option("--business-activity", help="Description of business activity")
+@click.option("--business-code", help="NAICS business code")
+@click.option("--date-started", help="Date business started (YYYY-MM-DD)")
+@click.option("--output", "-o", required=False, type=click.Path(), help="Output JSON file path")
+@click.option("--list-profiles", is_flag=True, help="List available profiles and exit")
+@click.pass_context
+def import_wise(
+    ctx: click.Context,
+    profile_id: int | None,
+    year: int,
+    currency: str,
+    entity_name: str,
+    ein: str | None,
+    address: str | None,
+    city: str | None,
+    state: str | None,
+    zip_code: str | None,
+    entity_type: str,
+    accounting_method: str,
+    business_activity: str | None,
+    business_code: str | None,
+    date_started: str | None,
+    output: str,
+    list_profiles: bool,
+) -> None:
+    """Import financial data from Wise.
+
+    Connects to the Wise API and downloads transactions for the specified
+    year and currency, then generates a FormBridge-compatible JSON file.
+
+    Requires WISE_API_TOKEN environment variable.
+
+    Example:
+        # First, list available profiles
+        formbridge import wise --list-profiles
+
+        # Then import data
+        formbridge import wise --profile 12345 --year 2025 --entity-name "My Company" \\
+            --output mycompany-2025.json
+    """
+    verbose = ctx.obj.get("verbose", False)
+
+    try:
+        from formbridge.connectors import (
+            WiseConnector,
+            EntityInfo,
+            ConnectorError,
+            AuthenticationError,
+        )
+
+        with console.status(f"[bold green]Connecting to Wise API..."):
+            connector = WiseConnector()
+
+        # List profiles mode
+        if list_profiles:
+            profiles = connector.get_profiles()
+            if not profiles:
+                console.print("[yellow]No profiles found[/]")
+                return
+
+            table = Table(title="Wise Profiles")
+            table.add_column("ID", style="cyan", no_wrap=True)
+            table.add_column("Type", style="green")
+            table.add_column("Name", style="yellow")
+
+            for profile in profiles:
+                table.add_row(
+                    str(profile.get("id", "")),
+                    profile.get("type", ""),
+                    profile.get("name", ""),
+                )
+
+            console.print(table)
+            console.print("\nUse --profile <ID> with the import command")
+            return
+
+        # Build entity info
+        entity_info = EntityInfo(
+            name=entity_name,
+            ein=ein,
+            address=address,
+            city=city,
+            state=state,
+            zip_code=zip_code,
+            entity_type=entity_type,
+            accounting_method=accounting_method,
+            business_activity=business_activity,
+            business_code=business_code,
+            date_business_started=date_started,
+        )
+
+        with console.status(f"[bold green]Fetching Wise balances..."):
+            if profile_id:
+                balances = connector.get_balances(profile_id)
+            else:
+                profiles = connector.get_profiles()
+                if not profiles:
+                    console.print("[red]Error:[/] No Wise profiles found")
+                    sys.exit(1)
+                profile_id = profiles[0].get("id")
+                console.print(f"[dim]Using profile ID: {profile_id}[/]")
+                balances = connector.get_balances(profile_id)
+
+            console.print(f"[green]✓[/] Found {len(balances)} balance(s)")
+            for bal in balances:
+                console.print(f"  {bal.currency}: ${bal.balance_cents / 100:,.2f}")
+
+        with console.status(f"[bold green]Downloading {currency} transactions for {year}..."):
+            tax_data = connector.generate_tax_data(
+                year=year,
+                entity_info=entity_info,
+                profile_id=profile_id,
+                currency=currency,
+            )
+
+        # Get summary info
+        meta = tax_data.get("_meta", {})
+        total_transactions = meta.get("total_transactions", 0)
+        income = tax_data.get("total_income", 0)
+        deductions = tax_data.get("total_deductions", 0)
+        net = tax_data.get("ordinary_income", 0)
+
+        # Write output
+        output_path = Path(output)
+        output_path.write_text(json.dumps(tax_data, indent=2))
+
+        console.print(f"[green]✓[/] Tax data exported to {output}")
+        console.print(f"  Year: {year}")
+        console.print(f"  Currency: {currency}")
+        console.print(f"  Transactions: {total_transactions}")
+        console.print(f"  Total Income: ${income:,.2f}")
+        console.print(f"  Total Deductions: ${deductions:,.2f}")
+        console.print(f"  Net Income: ${net:,.2f}")
+
+    except AuthenticationError as e:
+        console.print(f"[red]Authentication error:[/] {e}")
+        console.print("\n[yellow]Set your Wise API token:[/]")
+        console.print("  export WISE_API_TOKEN='your-api-token'")
+        sys.exit(1)
+    except ConnectorError as e:
+        console.print(f"[red]Connector error:[/] {e}")
+        sys.exit(1)
+    except ImportError:
+        console.print("[red]Error:[/] Wise connector not available")
+        console.print("Install with: pip install formbridge[connectors]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/] {e}")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
+@import_group.command("merge")
+@click.argument("files", nargs=-1, type=click.Path(exists=True), required=True)
+@click.option("--output", "-o", required=True, type=click.Path(), help="Output JSON file path")
+@click.option("--entity-name", help="Override entity name")
+@click.option("--ein", help="Override EIN")
+@click.option("--address", help="Override address")
+@click.option("--city", help="Override city")
+@click.option("--state", help="Override state")
+@click.option("--zip", "zip_code", help="Override ZIP code")
+@click.pass_context
+def import_merge(
+    ctx: click.Context,
+    files: tuple[str, ...],
+    output: str,
+    entity_name: str | None,
+    ein: str | None,
+    address: str | None,
+    city: str | None,
+    state: str | None,
+    zip_code: str | None,
+) -> None:
+    """Merge multiple tax data JSON files.
+
+    Combines multiple tax data JSON files into one, adding numeric values
+    together. Useful when you have data from multiple sources.
+
+    Example:
+        formbridge import merge mercury-2025.json wise-2025.json \\
+            --output combined-2025.json
+    """
+    verbose = ctx.obj.get("verbose", False)
+
+    try:
+        from formbridge.connectors import merge_tax_data, EntityInfo
+
+        if len(files) < 2:
+            console.print("[red]Error:[/] At least 2 files required for merge")
+            sys.exit(1)
+
+        # Load all data files
+        data_files = []
+        for file_path in files:
+            data = json.loads(Path(file_path).read_text())
+            data_files.append(data)
+            if verbose:
+                console.print(f"[dim]Loaded {file_path}[/]")
+
+        # Build entity info override if any fields provided
+        entity_info = None
+        if any([entity_name, ein, address, city, state, zip_code]):
+            entity_info = EntityInfo(
+                name=entity_name or "",
+                ein=ein,
+                address=address,
+                city=city,
+                state=state,
+                zip_code=zip_code,
+            )
+
+        # Merge data
+        merged = merge_tax_data(*data_files, entity_info=entity_info)
+
+        # Get summary info
+        meta = merged.get("_meta", {})
+        sources = meta.get("merged_from", [])
+        total_transactions = meta.get("total_transactions", 0)
+        income = merged.get("total_income", 0)
+        deductions = merged.get("total_deductions", 0)
+        net = merged.get("ordinary_income", 0)
+
+        # Write output
+        output_path = Path(output)
+        output_path.write_text(json.dumps(merged, indent=2))
+
+        console.print(f"[green]✓[/] Merged {len(files)} files into {output}")
+        console.print(f"  Sources: {', '.join(sources)}")
+        console.print(f"  Total Transactions: {total_transactions}")
+        console.print(f"  Total Income: ${income:,.2f}")
+        console.print(f"  Total Deductions: ${deductions:,.2f}")
+        console.print(f"  Net Income: ${net:,.2f}")
+
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Error:[/] Invalid JSON in input file: {e}")
+        sys.exit(1)
+    except ImportError:
+        console.print("[red]Error:[/] Merge functionality not available")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/] {e}")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
