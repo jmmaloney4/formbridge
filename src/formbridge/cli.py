@@ -766,6 +766,124 @@ def verify_command(
 
 
 # =============================================================================
+# Diff Command
+# =============================================================================
+
+
+@main.command("diff")
+@click.argument("old_pdf", type=click.Path(exists=True))
+@click.argument("new_pdf", type=click.Path(exists=True))
+@click.option("--all", "-a", "show_all", is_flag=True, help="Include unchanged fields")
+@click.option("--json", "-j", "output_json", is_flag=True, help="Output as JSON")
+@click.option("--report", "-r", type=click.Path(), help="Save diff report to a JSON file")
+@click.pass_context
+def diff_command(
+    ctx: click.Context,
+    old_pdf: str,
+    new_pdf: str,
+    show_all: bool,
+    output_json: bool,
+    report: str | None,
+) -> None:
+    """Compare two filled PDFs field-by-field.
+
+    Shows which fields were added, removed, or changed between two
+    versions of a filled PDF form. Useful for reviewing iterative
+    edits to tax forms, immigration applications, or any PDF workflow.
+
+    Examples:\b
+
+        formbridge diff draft-v1.pdf draft-v2.pdf
+        formbridge diff old.pdf new.pdf --all
+        formbridge diff old.pdf new.pdf --json
+        formbridge diff old.pdf new.pdf -r report.json
+    """
+    from formbridge.diff import diff_pdfs
+
+    verbose = ctx.obj.get("verbose", False)
+
+    try:
+        result = diff_pdfs(old_pdf, new_pdf, include_unchanged=show_all)
+
+        if output_json:
+            import json as json_mod
+            console.print(json_mod.dumps(result.to_dict(), indent=2))
+        else:
+            # Rich table output
+            old_name = Path(old_pdf).name
+            new_name = Path(new_pdf).name
+            stats = result.stats
+
+            console.print()
+            console.print(
+                Panel(
+                    f"[bold]{old_name}[/] -> [bold]{new_name}[/]\n"
+                    f"{stats['total']} fields examined  |  "
+                    f"[green]+{stats['added']} added[/]  "
+                    f"[red]-{stats['removed']} removed[/]  "
+                    f"[yellow]~{stats['changed']} changed[/]  "
+                    f"[dim]={stats['unchanged']} unchanged[/]",
+                    title="FormBridge Diff",
+                )
+            )
+
+            if result.added:
+                table = Table(title="Added Fields", title_style="green")
+                table.add_column("Field", style="cyan")
+                table.add_column("Value", style="green")
+                for d in result.added:
+                    table.add_row(d.field_name, d.new_value or "[dim](empty)[/]")
+                console.print(table)
+
+            if result.removed:
+                table = Table(title="Removed Fields", title_style="red")
+                table.add_column("Field", style="cyan")
+                table.add_column("Value", style="red")
+                for d in result.removed:
+                    table.add_row(d.field_name, d.old_value or "[dim](empty)[/]")
+                console.print(table)
+
+            if result.changed:
+                table = Table(title="Changed Fields", title_style="yellow")
+                table.add_column("Field", style="cyan")
+                table.add_column("Old Value", style="red")
+                table.add_column("New Value", style="green")
+                for d in result.changed:
+                    table.add_row(
+                        d.field_name,
+                        d.old_value or "[dim](empty)[/]",
+                        d.new_value or "[dim](empty)[/]",
+                    )
+                console.print(table)
+
+            if show_all and result.unchanged:
+                table = Table(title="Unchanged Fields", title_style="dim")
+                table.add_column("Field", style="cyan")
+                table.add_column("Value", style="dim")
+                for d in result.unchanged:
+                    table.add_row(d.field_name, d.old_value or "[dim](empty)[/]")
+                console.print(table)
+
+            if not result.has_differences:
+                console.print("\n[green]No differences found.[/] The forms are identical.")
+
+        # Save report
+        if report:
+            import json as json_mod
+            Path(report).write_text(json_mod.dumps(result.to_dict(), indent=2))
+            console.print(f"\n[green]\u2713[/] Diff report saved to {report}")
+
+    except FileNotFoundError as e:
+        console.print(f"[red]Error:[/] {e}")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Error:[/] {e}")
+        if verbose:
+            console.print_exception()
+        sys.exit(1)
+
+
+# =============================================================================
 # View Command
 # =============================================================================
 

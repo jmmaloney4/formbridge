@@ -29,6 +29,7 @@ FormBridge is an open-source CLI tool that fills any PDF form accurately by comb
 - **Template system** - Scan once, fill many times
 - **MCP server** - Works with Claude Desktop, OpenClaw, any MCP client
 - **Verification workflow** - Interactive review before writing
+- **PDF diff** - Compare two filled forms field-by-field to see what changed
 
 ## Quick Install
 
@@ -125,6 +126,20 @@ formbridge verify <filled.pdf> --template <template-name>
 ```
 
 Shows field-by-field breakdown of what was filled.
+
+### `formbridge diff`
+
+Compare two filled PDFs field-by-field.
+
+```bash
+formbridge diff <old.pdf> <new.pdf>            # Show changes
+formbridge diff old.pdf new.pdf --all          # Include unchanged fields
+formbridge diff old.pdf new.pdf --json         # JSON output
+formbridge diff old.pdf new.pdf -r report.json # Save diff report
+```
+
+Shows added, removed, and changed fields with color-coded output.
+Useful for reviewing iterative edits to tax forms, immigration applications, or any PDF workflow.
 
 ### `formbridge template`
 

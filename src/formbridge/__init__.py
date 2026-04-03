@@ -57,7 +57,7 @@ from formbridge.llm import (
     load_config as load_llm_config,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Nilsy"
 __email__ = "nilsyai@users.noreply.github.com"
 __license__ = "MIT"
