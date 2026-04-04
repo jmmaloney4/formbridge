@@ -17,6 +17,46 @@ from typing import Any, Protocol
 import httpx
 
 
+def _ensure_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Recursively sanitize a JSON schema for OpenAI strict mode.
+
+    OpenAI requires:
+    - Every ``type: "object"`` node must have ``additionalProperties: false``
+    - Union types like ``type: ["string", "null"]`` must use ``anyOf`` instead
+    - All properties must be listed in ``required`` (optional fields use
+      nullable ``anyOf``)
+
+    This helper walks the schema tree and patches these issues in-place so
+    callers don't have to worry about OpenAI-specific constraints.
+    """
+    # Handle union types: ["string", "null"] -> anyOf
+    if isinstance(schema.get("type"), list):
+        schema["anyOf"] = [{"type": t} for t in schema["type"]]
+        del schema["type"]
+
+    # Handle object nodes
+    if schema.get("type") == "object":
+        schema.setdefault("additionalProperties", False)
+        if "properties" in schema:
+            # Ensure all properties are in required (strict mode requirement)
+            schema["required"] = list(schema["properties"].keys())
+            # Recurse into properties
+            for key, prop in schema["properties"].items():
+                _ensure_strict_schema(prop)
+
+    # Handle array nodes
+    if schema.get("type") == "array" and "items" in schema:
+        _ensure_strict_schema(schema["items"])
+
+    # Handle anyOf / oneOf
+    for keyword in ("anyOf", "oneOf", "allOf"):
+        if keyword in schema:
+            for sub in schema[keyword]:
+                _ensure_strict_schema(sub)
+
+    return schema
+
+
 class LLMProvider(Protocol):
     """Protocol for LLM providers.
 
@@ -220,7 +260,7 @@ class OpenAIProvider(BaseLLMProvider):
                 "type": "json_schema",
                 "json_schema": {
                     "name": "structured_output",
-                    "schema": schema,
+                    "schema": _ensure_strict_schema(schema),
                     "strict": True,
                 },
             }
