@@ -73,11 +73,7 @@ class LLMConfig:
         """Get the effective model name (with defaults)."""
         if self.model:
             return self.model
-        if self.provider == "openai":
-            return "gpt-4o-mini"
-        if self.provider == "anthropic":
-            return "claude-3-5-sonnet-20241022"
-        return "unknown"
+        return _PROVIDER_DEFAULTS.get(self.provider, "unknown")
 
 
 # Provider name -> litellm prefix mapping
@@ -155,6 +151,8 @@ class LiteLLMProvider:
             kwargs["api_key"] = self.config.api_key
         if self.config.base_url:
             kwargs["api_base"] = self.config.base_url
+        if self.config.timeout:
+            kwargs["timeout"] = self.config.timeout
 
         # Add structured output if schema provided
         if schema:
@@ -171,28 +169,31 @@ class LiteLLMProvider:
             response = litellm.completion(**kwargs)
         except litellm.AuthenticationError as e:
             raise LLMConfigError(str(e)) from e
-        except litellm.APIError as e:
+        except litellm.RateLimitError as e:
             raise LLMAPIError(
                 str(e),
-                status_code=getattr(e, "status_code", None),
+                status_code=getattr(e, "status_code", 429),
             ) from e
         except litellm.BadRequestError as e:
             raise LLMAPIError(
                 str(e),
                 status_code=getattr(e, "status_code", 400),
             ) from e
-        except litellm.RateLimitError as e:
-            raise LLMAPIError(
-                str(e),
-                status_code=getattr(e, "status_code", 429),
-            ) from e
         except litellm.Timeout as e:
             raise LLMAPIError(f"Request timed out: {e}") from e
+        except litellm.APIError as e:
+            raise LLMAPIError(
+                str(e),
+                status_code=getattr(e, "status_code", None),
+            ) from e
         except Exception as e:
             raise LLMAPIError(f"litellm error: {e}") from e
 
-        choice = response.choices[0]
-        content = choice.message.content
+        try:
+            choice = response.choices[0]
+            content = choice.message.content
+        except (AttributeError, IndexError, TypeError) as e:
+            raise LLMAPIError("Unexpected response format from LLM provider") from e
 
         # Parse JSON if structured output was requested
         if schema and isinstance(content, str):
@@ -226,8 +227,9 @@ def create_provider(
     3. Defaults (OpenAI with gpt-4o-mini)
 
     Args:
-        provider: Provider name ('openai', 'anthropic', 'local')
-        model: Model name
+        provider: Provider name (e.g. 'openai', 'anthropic', 'local', or any
+            litellm-supported prefix like 'gemini', 'ollama', 'vertex_ai')
+        model: Model name (provider-prefixed names like 'openai/gpt-4o' also accepted)
         api_key: API key
         base_url: Custom base URL
 

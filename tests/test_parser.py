@@ -465,8 +465,10 @@ class TestLiteLLMProvider:
                 config=LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test-key-123")
             )
 
-            with pytest.raises(LLMAPIError):
+            with pytest.raises(LLMAPIError) as exc_info:
                 provider.complete([{"role": "user", "content": "Hi"}])
+
+            assert exc_info.value.status_code == 429
 
     def test_complete_handles_timeout(self) -> None:
         """Test handling of timeout errors."""
