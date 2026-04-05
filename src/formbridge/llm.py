@@ -101,7 +101,12 @@ def _resolve_model_name(provider: str, model: str | None) -> str:
         return model  # Already a litellm-prefixed name
 
     prefix = _PROVIDER_PREFIXES.get(provider, provider)
-    resolved = model or _PROVIDER_DEFAULTS.get(provider, "gpt-4o-mini")
+    resolved = model or _PROVIDER_DEFAULTS.get(provider)
+    if not resolved:
+        raise LLMConfigError(
+            f"No model specified for provider '{provider}'. "
+            f"Set FORMBRIDGE_MODEL or pass model= to create_provider()."
+        )
     return f"{prefix}/{resolved}"
 
 
@@ -162,8 +167,9 @@ class LiteLLMProvider:
             kwargs["api_key"] = self.config.api_key
         if self.config.base_url:
             kwargs["api_base"] = self.config.base_url
-        if self.config.timeout:
+        if self.config.timeout is not None:
             kwargs["timeout"] = self.config.timeout
+        kwargs["num_retries"] = 3
 
         # Add structured output if schema provided
         if schema:
@@ -207,7 +213,7 @@ class LiteLLMProvider:
             choice = response.choices[0]
             content = choice.message.content
         except (AttributeError, IndexError, TypeError) as e:
-            raise LLMAPIError("Unexpected response format from LLM provider") from e
+            raise LLMAPIError(f"Unexpected response format from LLM provider: {e}") from e
 
         # Parse JSON if structured output was requested
         if schema and isinstance(content, str):
@@ -261,7 +267,7 @@ def create_provider(
 
     # For local models, default to Ollama endpoint
     if resolved_provider == "local" and not resolved_base_url:
-        resolved_base_url = "http://localhost:11434/v1"
+        resolved_base_url = "http://localhost:11434"
 
     # Provider-specific API key resolution
     if resolved_provider == "openai" and not resolved_api_key:
