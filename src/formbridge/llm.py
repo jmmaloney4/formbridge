@@ -119,6 +119,16 @@ class LiteLLMProvider:
         self.config = config
         self._model = _resolve_model_name(config.provider, config.model)
 
+    def __enter__(self) -> LiteLLMProvider:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the provider (no-op for litellm, kept for interface compat)."""
+        pass
+
     def complete(
         self,
         messages: list[dict[str, Any]],
@@ -145,6 +155,7 @@ class LiteLLMProvider:
             "model": self._model,
             "messages": messages,
             "temperature": temperature,
+            "max_tokens": 4096,
         }
 
         if self.config.api_key:
@@ -173,11 +184,13 @@ class LiteLLMProvider:
             raise LLMAPIError(
                 str(e),
                 status_code=getattr(e, "status_code", 429),
+                response_body=getattr(e, "llm_response", None),
             ) from e
         except litellm.BadRequestError as e:
             raise LLMAPIError(
                 str(e),
                 status_code=getattr(e, "status_code", 400),
+                response_body=getattr(e, "llm_response", None),
             ) from e
         except litellm.Timeout as e:
             raise LLMAPIError(f"Request timed out: {e}") from e
@@ -185,6 +198,7 @@ class LiteLLMProvider:
             raise LLMAPIError(
                 str(e),
                 status_code=getattr(e, "status_code", None),
+                response_body=getattr(e, "llm_response", None),
             ) from e
         except Exception as e:
             raise LLMAPIError(f"litellm error: {e}") from e
