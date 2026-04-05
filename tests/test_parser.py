@@ -520,11 +520,18 @@ class TestProviderFactory:
 
     def test_create_local_provider(self) -> None:
         """Test that 'local' creates a LiteLLMProvider with Ollama defaults."""
+        provider = create_provider(provider="local")
+        assert isinstance(provider, LiteLLMProvider)
+        assert provider.config.base_url == "http://localhost:11434"
+
+    def test_create_local_provider_normalizes_v1(self) -> None:
+        """Test that 'local' provider strips /v1 from base_url for litellm ollama."""
         provider = create_provider(
             provider="local",
             base_url="http://localhost:11434/v1",
         )
         assert isinstance(provider, LiteLLMProvider)
+        assert provider.config.base_url == "http://localhost:11434"
 
 
 # =============================================================================

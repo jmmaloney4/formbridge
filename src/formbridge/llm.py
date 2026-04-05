@@ -265,9 +265,12 @@ def create_provider(
     resolved_api_key = api_key or os.getenv("FORMBRIDGE_API_KEY")
     resolved_base_url = base_url or os.getenv("FORMBRIDGE_API_BASE")
 
-    # For local models, default to Ollama endpoint
-    if resolved_provider == "local" and not resolved_base_url:
-        resolved_base_url = "http://localhost:11434"
+    # For local models, default to Ollama endpoint and normalize /v1 suffix
+    if resolved_provider == "local":
+        if not resolved_base_url:
+            resolved_base_url = "http://localhost:11434"
+        elif resolved_base_url.endswith("/v1"):
+            resolved_base_url = resolved_base_url[:-3]
 
     # Provider-specific API key resolution
     if resolved_provider == "openai" and not resolved_api_key:
