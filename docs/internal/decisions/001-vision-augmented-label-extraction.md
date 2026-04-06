@@ -1,7 +1,7 @@
 # ADR 001: Vision-Augmented Label Extraction for AcroForm Fields
 
 *Date:* 2026-04-05
-*Status:* proposed
+*Status:* accepted
 
 ## Context
 
@@ -116,6 +116,28 @@ When `vision_labels=False` (default), behavior is identical to today. This avoid
 
 5. **Use the existing LLM-based mapper to infer labels** -- Run the mapper against a dummy dataset and see which fields it guesses. Rejected: This is circular. The mapper's accuracy depends on having good labels. Asking the mapper to produce labels from bad labels is unreliable.
 
+### External Tooling Assessment (2026-04-06)
+
+We evaluated several external document processing tools to determine if they could replace or supplement the vision-LLM approach:
+
+**Chandra OCR 2 (Datalab)** — Open-source OCR model (Apache 2.0) that beats GPT-5 Mini and Gemini at document OCR (85.9% benchmark accuracy). Handles forms with checkboxes, tables, handwriting, 90 languages. Runs locally at ~2 pages/second on GPU, or via free hosted API. Install: `pip install chandra-ocr[all]`.
+
+Assessment: Chandra is a strong text extraction tool but solves a different problem. It extracts *document content* but does not know about AcroForm field widgets or their bounding boxes. We would still need to correlate Chandra's text output with our field positions. Could replace pdfplumber's broken text extraction in the proximity-based label fallback, but does not eliminate the need for positional correlation. Not a fit for ADR 001's core vision approach, but could be useful as a future improvement to the non-vision label extraction path.
+
+**LlamaParse / LiteParse (LlamaIndex)** — LlamaParse is a cloud API for multimodal PDF parsing (structured Markdown/JSON output). LiteParse (released March 2026) is the local, no-GPU alternative.
+
+Assessment: Both extract document content (what is printed on the page) but have no awareness of AcroForm field widgets. They would produce clean text where pdfplumber produces garbage, but we would still need to correlate text positions with field bounding boxes. LlamaParse adds a cloud dependency and cost. LiteParse could theoretically replace pdfplumber as the text extraction backend for proximity matching, but the ADR 001 vision approach is simpler and more direct for our specific problem (mapping bounding boxes to semantic labels in 2 API calls).
+
+**Docling (IBM)** — Open-source (MIT, 57K GitHub stars) PDF-to-Markdown/JSON converter with vision-based table recognition. Python-first.
+
+Assessment: Docling has an open issue (#673) requesting AcroForm/form-field extraction support, which is not yet implemented. Like the others, it extracts content but not form field metadata. Would need positional correlation. Not a fit for our current needs.
+
+**Unstructured.io** — Document ETL platform with VLM-based partitioning and semantic chunking. More oriented toward RAG ingestion pipelines than form field labeling.
+
+Assessment: Overkill for our use case. The partitioning model produces semantic elements (titles, lists, tables) but not "which AcroForm field does this text label?" answers.
+
+**Conclusion:** None of these tools solve the core problem (correlating AcroForm field bounding boxes with their semantic labels on rendered forms). The ADR 001 approach of rendering annotated pages and asking a vision LLM remains the most direct solution. However, Chandra OCR 2 or LiteParse could be valuable future additions to improve the non-vision fallback path (replacing pdfplumber's garbled text extraction for proximity matching).
+
 ## Consequences
 
 - **Pros:**
@@ -213,3 +235,4 @@ The corresponding fields should have labels like "Your first name and middle ini
 
 - depends on: the existing `llm.py` LLM provider infrastructure for multimodal API calls
 - related: `nilsyai/formbridge` upstream issue for improved label extraction (TBD whether to contribute upstream)
+- updated: 2026-04-06 — added external tooling assessment (Chandra OCR 2, LlamaParse/LiteParse, Docling, Unstructured.io); confirmed vision-LLM approach remains the best fit
