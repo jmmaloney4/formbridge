@@ -485,8 +485,27 @@ class Mapper:
             )
             logger.info(f"LLM produced {len(llm_mappings)} mappings")
 
-        # Process LLM mappings
+        # Process LLM mappings — deduplicate by field_id, keeping highest confidence
+        seen_fields: dict[str, FieldMapping] = {}
+        duplicate_ids: set[str] = set()
         for mapping in llm_mappings:
+            existing = seen_fields.get(mapping.field_id)
+            if existing is not None:
+                duplicate_ids.add(mapping.field_id)
+                if mapping.confidence > existing.confidence:
+                    seen_fields[mapping.field_id] = mapping
+            else:
+                seen_fields[mapping.field_id] = mapping
+
+        if duplicate_ids:
+            for dup_id in sorted(duplicate_ids):
+                result.warnings.append(MappingWarning(
+                    field_id=dup_id,
+                    message=f"LLM mapped multiple data keys to {dup_id}; kept highest-confidence mapping",
+                    severity="info",
+                ))
+
+        for mapping in seen_fields.values():
             # Skip if this is a calculated field (we'll handle those separately)
             if mapping.field_id in calc_field_ids:
                 # Store for later cross-check
