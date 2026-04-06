@@ -51,6 +51,15 @@ class FormField(BaseModel):
     options: list[str] | None = Field(default=None, description="Options for radio/select fields")
     # For checkboxes
     checked_value: str | None = Field(default=None, description="Value when checkbox is checked (usually 'Yes' or 'On')")
+    # Label provenance (ADR 001)
+    label_source: str | None = Field(
+        default=None,
+        description="How the label was derived: 'acroform', 'vision', 'ocr', or None",
+    )
+    label_confidence: float | None = Field(
+        default=None,
+        description="Confidence score for the label (0.0-1.0). Set by vision refinement.",
+    )
 
 
 class FormSchema(BaseModel):

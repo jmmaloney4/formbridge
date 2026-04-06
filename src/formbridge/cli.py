@@ -124,8 +124,9 @@ def main(ctx: click.Context, verbose: bool, output_format: str, provider: str | 
 @main.command()
 @click.argument("pdf_path", type=click.Path(exists=True))
 @click.option("--output", "-o", type=click.Path(), help="Output file for field schema (JSON)")
+@click.option("--vision-labels", is_flag=True, help="Enable vision-based label refinement (ADR 001)")
 @click.pass_context
-def scan(ctx: click.Context, pdf_path: str, output: str | None) -> None:
+def scan(ctx: click.Context, pdf_path: str, output: str | None, vision_labels: bool) -> None:
     """Scan a PDF form and extract field structure.
 
     Extracts all fillable fields from a PDF, including field types,
@@ -133,12 +134,13 @@ def scan(ctx: click.Context, pdf_path: str, output: str | None) -> None:
 
     Example:
         formbridge scan form.pdf --output fields.json
+        formbridge scan form.pdf --vision-labels --output fields.json
     """
     verbose = ctx.obj.get("verbose", False)
     output_format = ctx.obj.get("format", "json")
 
     try:
-        scanner = Scanner(pdf_path, verbose=verbose)
+        scanner = Scanner(pdf_path, verbose=verbose, vision_labels=vision_labels)
         schema = scanner.scan()
 
         if output_format == "table":

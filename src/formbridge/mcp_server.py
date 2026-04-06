@@ -59,7 +59,8 @@ TOOLS = [
         description=(
             "Scan a PDF form and extract field structure. "
             "Returns a FormSchema with all detected fields, their types, positions, and labels. "
-            "Use this first to understand what fields a form contains."
+            "Use this first to understand what fields a form contains. "
+            "Set vision_labels=true for forms with garbled text labels (e.g., IRS tax forms)."
         ),
         inputSchema={
             "type": "object",
@@ -67,6 +68,12 @@ TOOLS = [
                 "pdf_path": {
                     "type": "string",
                     "description": "Path to the blank PDF form to scan",
+                },
+                "vision_labels": {
+                    "type": "boolean",
+                    "description": "Enable vision-based label refinement via LLM (ADR 001). "
+                    "Recommended for IRS forms where text extraction produces garbled labels.",
+                    "default": False,
                 },
             },
             "required": ["pdf_path"],
@@ -220,6 +227,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 async def handle_scan(args: dict[str, Any]) -> list[TextContent]:
     """Handle formbridge_scan tool."""
     pdf_path = args.get("pdf_path")
+    vision_labels = args.get("vision_labels", False)
+
     if not pdf_path:
         return [TextContent(
             type="text",
@@ -234,7 +243,7 @@ async def handle_scan(args: dict[str, Any]) -> list[TextContent]:
         )]
 
     try:
-        scanner = Scanner(path)
+        scanner = Scanner(path, vision_labels=vision_labels)
         schema = scanner.scan()
 
         result = {

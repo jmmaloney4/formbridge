@@ -11,7 +11,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pdfplumber
 
@@ -157,6 +157,7 @@ class PDFFieldExtractor:
             line_ref=line_ref,
             options=options,
             checked_value=checked_value,
+            label_source="acroform" if label else None,
         )
 
     def _extract_label(self, field_name: str, field_data: dict) -> str | None:
@@ -465,15 +466,26 @@ class OCRFieldDetector:
 class Scanner:
     """Main scanner class that coordinates field extraction."""
 
-    def __init__(self, pdf_path: str | Path, verbose: bool = False) -> None:
+    def __init__(
+        self,
+        pdf_path: str | Path,
+        verbose: bool = False,
+        vision_labels: bool = False,
+        llm_provider: Any | None = None,
+    ) -> None:
         """Initialize scanner with a PDF file path.
 
         Args:
             pdf_path: Path to the PDF file
             verbose: Enable verbose logging
+            vision_labels: Enable vision-based label refinement (ADR 001)
+            llm_provider: Optional LLM provider for vision calls. If not provided
+                but vision_labels is True, one will be created from environment config.
         """
         self.pdf_path = Path(pdf_path)
         self.verbose = verbose
+        self.vision_labels = vision_labels
+        self._llm_provider = llm_provider
 
         if not self.pdf_path.exists():
             raise ScannerError(f"PDF file not found: {self.pdf_path}")
@@ -530,7 +542,84 @@ class Scanner:
                 f"(source: {source})"
             )
 
+            # Vision label refinement (ADR 001)
+            if self.vision_labels and schema.fields:
+                self._refine_labels_with_vision(schema)
+
             return schema
+
+    def _refine_labels_with_vision(self, schema: FormSchema) -> None:
+        """Refine field labels using vision LLM on annotated page renders.
+
+        ADR 001: Renders each page with numbered bounding boxes, sends to a
+        vision-capable LLM, and updates field labels with the results.
+        """
+        from formbridge.vision import (
+            LLMVisionLabelProvider,
+            render_annotated_page,
+        )
+
+        # Get or create LLM provider
+        provider = self._llm_provider
+        if provider is None:
+            from formbridge.llm import create_provider
+            provider = create_provider()
+            self._llm_provider = provider
+
+        vision = LLMVisionLabelProvider(provider)
+
+        # Group fields by page
+        pages: dict[int, list[FormField]] = {}
+        for field in schema.fields:
+            pages.setdefault(field.page, []).append(field)
+
+        # Get page dimensions
+        with pdfplumber.open(self.pdf_path) as pdf:
+            page_dims = {
+                i + 1: (p.width, p.height)
+                for i, p in enumerate(pdf.pages)
+            }
+
+        for page_num, page_fields in sorted(pages.items()):
+            # Filter to fields with positions
+            positioned = [f for f in page_fields if f.position]
+            if not positioned:
+                continue
+
+            dims = page_dims.get(page_num)
+            if not dims:
+                continue
+            pw, ph = dims
+
+            logger.info(
+                f"Vision refinement: rendering page {page_num} "
+                f"with {len(positioned)} fields"
+            )
+
+            try:
+                img_bytes = render_annotated_page(
+                    self.pdf_path,
+                    page_num - 1,  # 0-based index
+                    positioned,
+                    pw, ph,
+                )
+            except Exception as e:
+                logger.error(f"Failed to render page {page_num}: {e}")
+                continue
+
+            try:
+                labels = vision.refine_labels(img_bytes, positioned, pw, ph)
+            except Exception as e:
+                logger.error(f"Vision label call failed for page {page_num}: {e}")
+                continue
+
+            # Update field labels
+            for field in positioned:
+                if field.id in labels:
+                    label_text, confidence = labels[field.id]
+                    field.label = label_text
+                    field.label_source = "vision"
+                    field.label_confidence = confidence
 
     def _generate_form_id(self) -> str:
         """Generate a form ID from the filename."""
@@ -558,15 +647,20 @@ class Scanner:
         return schema.model_dump_json(indent=2)
 
 
-def scan_pdf(pdf_path: str | Path, verbose: bool = False) -> FormSchema:
+def scan_pdf(
+    pdf_path: str | Path,
+    verbose: bool = False,
+    vision_labels: bool = False,
+) -> FormSchema:
     """Convenience function to scan a PDF.
 
     Args:
         pdf_path: Path to the PDF file
         verbose: Enable verbose logging
+        vision_labels: Enable vision-based label refinement (ADR 001)
 
     Returns:
         FormSchema with all detected fields
     """
-    scanner = Scanner(pdf_path, verbose=verbose)
+    scanner = Scanner(pdf_path, verbose=verbose, vision_labels=vision_labels)
     return scanner.scan()
