@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pikepdf
 import pytest
 
@@ -850,11 +849,8 @@ class TestFillCLI:
             ],
         }
 
-        with patch.object(httpx.Client, "post") as mock_post:
-            mock_post.return_value = _mock_httpx_response(
-                200,
-                json_body=_make_openai_response(llm_response),
-            )
+        with patch("litellm.completion") as mock_completion:
+            mock_completion.return_value = _mock_litellm_response(llm_response)
 
             runner = CliRunner()
             result = runner.invoke(main, [
@@ -915,11 +911,8 @@ class TestFullPipeline:
 
         llm_config = LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test")
 
-        with patch.object(httpx.Client, "post") as mock_post:
-            mock_post.return_value = _mock_httpx_response(
-                200,
-                json_body=_make_openai_response(llm_response),
-            )
+        with patch("litellm.completion") as mock_completion:
+            mock_completion.return_value = _mock_litellm_response(llm_response)
 
             mapper = Mapper(
                 user_data=user_data,
@@ -945,35 +938,17 @@ class TestFullPipeline:
             assert len(pdf.pages) > 0
 
 
-def _make_openai_response(content: Any) -> dict[str, Any]:
-    """Create a mock OpenAI API response body."""
+def _mock_litellm_response(content: Any, model: str = "gpt-4o-mini") -> MagicMock:
+    """Create a mock litellm.completion response object."""
     if isinstance(content, dict):
         content_str = json.dumps(content)
     else:
         content_str = str(content)
-    return {
-        "id": "chatcmpl-test",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content_str,
-                },
-                "finish_reason": "stop",
-            }
-        ],
-        "model": "gpt-4o-mini",
-        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
-    }
-
-
-def _mock_httpx_response(status_code: int, json_body: Any = None, text: str = "") -> httpx.Response:
-    """Create a mock httpx.Response with a request instance set."""
-    request = httpx.Request("POST", "https://mock.api.com/endpoint")
-    if json_body is not None:
-        resp = httpx.Response(status_code, json=json_body, request=request)
-    else:
-        resp = httpx.Response(status_code, text=text, request=request)
-    return resp
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = content_str
+    mock_response.model = model
+    mock_response.usage = MagicMock()
+    mock_response.usage.prompt_tokens = 100
+    mock_response.usage.completion_tokens = 50
+    return mock_response

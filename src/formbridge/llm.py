@@ -1,20 +1,17 @@
 """LLM provider abstraction for FormBridge.
 
 This module provides a protocol-based abstraction for LLM providers,
-allowing FormBridge to work with OpenAI, Anthropic, and any OpenAI-compatible API
-using only HTTP calls (no SDK dependencies).
+powered by litellm for unified access to 100+ providers (OpenAI, Anthropic,
+Gemini, Ollama, etc.) including multimodal/vision support.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
-
-import httpx
 
 
 class LLMProvider(Protocol):
@@ -76,118 +73,66 @@ class LLMConfig:
         """Get the effective model name (with defaults)."""
         if self.model:
             return self.model
-        if self.provider == "openai":
-            return "gpt-4o-mini"
-        if self.provider == "anthropic":
-            return "claude-3-5-sonnet-20241022"
-        return "unknown"
+        return _PROVIDER_DEFAULTS.get(self.provider, "unknown")
 
 
-class BaseLLMProvider(ABC):
-    """Base class for LLM providers with common functionality."""
+# Provider name -> litellm prefix mapping
+_PROVIDER_PREFIXES: dict[str, str] = {
+    "openai": "openai",
+    "anthropic": "anthropic",
+    "local": "ollama",
+}
+
+# Provider name -> default model (without prefix)
+_PROVIDER_DEFAULTS: dict[str, str] = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "local": "llama3.1",
+}
+
+
+def _resolve_model_name(provider: str, model: str | None) -> str:
+    """Convert FormBridge provider+model to litellm model string.
+
+    Handles both old-style config ('openai' + 'gpt-4o-mini') and
+    litellm-prefixed names ('openai/gpt-4o-mini').
+    """
+    if model and "/" in model:
+        return model  # Already a litellm-prefixed name
+
+    prefix = _PROVIDER_PREFIXES.get(provider, provider)
+    resolved = model or _PROVIDER_DEFAULTS.get(provider)
+    if not resolved:
+        raise LLMConfigError(
+            f"No model specified for provider '{provider}'. "
+            f"Set FORMBRIDGE_MODEL or pass model= to create_provider()."
+        )
+    return f"{prefix}/{resolved}"
+
+
+class LiteLLMProvider:
+    """LLM provider backed by litellm.
+
+    Handles all providers via litellm's unified completion API,
+    including multimodal/vision content blocks.
+    """
 
     def __init__(
         self,
-        api_key: str | None = None,
-        model: str | None = None,
-        base_url: str | None = None,
-        timeout: float = 120.0,
-    ):
-        """Initialize the provider.
+        config: LLMConfig,
+    ) -> None:
+        self.config = config
+        self._model = _resolve_model_name(config.provider, config.model)
 
-        Args:
-            api_key: API key for the provider
-            model: Model name to use
-            base_url: Custom base URL for the API
-            timeout: Request timeout in seconds
-        """
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url
-        self.timeout = timeout
-        self._client: httpx.Client | None = None
-
-    @property
-    def client(self) -> httpx.Client:
-        """Get or create HTTP client."""
-        if self._client is None:
-            headers = self._get_headers()
-            self._client = httpx.Client(
-                base_url=self.base_url,
-                headers=headers,
-                timeout=self.timeout,
-            )
-        return self._client
-
-    @abstractmethod
-    def _get_headers(self) -> dict[str, str]:
-        """Get HTTP headers for requests."""
-        pass
-
-    def close(self) -> None:
-        """Close the HTTP client."""
-        if self._client:
-            self._client.close()
-            self._client = None
-
-    def __enter__(self) -> BaseLLMProvider:
-        """Context manager entry."""
+    def __enter__(self) -> LiteLLMProvider:
         return self
 
     def __exit__(self, *args: Any) -> None:
-        """Context manager exit."""
         self.close()
 
-
-class OpenAIProvider(BaseLLMProvider):
-    """OpenAI-compatible LLM provider.
-
-    Works with:
-    - OpenAI API (gpt-4o, gpt-4o-mini, etc.)
-    - Ollama (with /v1 endpoints)
-    - LM Studio
-    - Any OpenAI-compatible API
-    """
-
-    DEFAULT_BASE_URL = "https://api.openai.com/v1"
-    DEFAULT_MODEL = "gpt-4o-mini"
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str | None = None,
-        base_url: str | None = None,
-        timeout: float = 120.0,
-    ):
-        """Initialize OpenAI-compatible provider.
-
-        Args:
-            api_key: API key (defaults to OPENAI_API_KEY env var)
-            model: Model name (defaults to gpt-4o-mini)
-            base_url: API base URL (defaults to OpenAI's API)
-            timeout: Request timeout
-        """
-        # Resolve API key
-        resolved_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not resolved_key and not base_url:
-            # Local models often don't need API keys
-            pass
-
-        super().__init__(
-            api_key=resolved_key,
-            model=model or self.DEFAULT_MODEL,
-            base_url=base_url or self.DEFAULT_BASE_URL,
-            timeout=timeout,
-        )
-
-    def _get_headers(self) -> dict[str, str]:
-        """Get headers for OpenAI API requests."""
-        headers = {
-            "Content-Type": "application/json",
-        }
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
+    def close(self) -> None:
+        """Close the provider (no-op for litellm, kept for interface compat)."""
+        pass
 
     def complete(
         self,
@@ -195,28 +140,40 @@ class OpenAIProvider(BaseLLMProvider):
         schema: dict[str, Any] | None = None,
         temperature: float = 0.0,
     ) -> dict[str, Any]:
-        """Send completion request to OpenAI-compatible API.
+        """Send completion request via litellm.
 
         Args:
-            messages: List of message dicts
+            messages: List of message dicts (OpenAI format, supports image_url content)
             schema: Optional JSON schema for structured output
             temperature: Sampling temperature
 
         Returns:
-            Response dict with 'content' containing the response
-        """
-        if not self.model:
-            raise LLMConfigError("Model name is required")
+            Response dict with 'content', 'model', and 'usage' keys
 
-        payload: dict[str, Any] = {
-            "model": self.model,
+        Raises:
+            LLMConfigError: If configuration is invalid
+            LLMAPIError: If the API call fails
+        """
+        import litellm
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
             "messages": messages,
             "temperature": temperature,
+            "max_tokens": 4096,
         }
+
+        if self.config.api_key:
+            kwargs["api_key"] = self.config.api_key
+        if self.config.base_url:
+            kwargs["api_base"] = self.config.base_url
+        if self.config.timeout is not None:
+            kwargs["timeout"] = self.config.timeout
+        kwargs["num_retries"] = 3
 
         # Add structured output if schema provided
         if schema:
-            payload["response_format"] = {
+            kwargs["response_format"] = {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "structured_output",
@@ -226,25 +183,37 @@ class OpenAIProvider(BaseLLMProvider):
             }
 
         try:
-            response = self.client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
+            response = litellm.completion(**kwargs)
+        except litellm.AuthenticationError as e:
+            raise LLMConfigError(str(e)) from e
+        except litellm.RateLimitError as e:
             raise LLMAPIError(
-                f"OpenAI API error: {e.response.status_code}",
-                status_code=e.response.status_code,
-                response_body=e.response.text,
+                str(e),
+                status_code=getattr(e, "status_code", 429),
+                response_body=getattr(e, "llm_response", None),
             ) from e
-        except httpx.RequestError as e:
-            raise LLMAPIError(f"Request failed: {e}") from e
+        except litellm.BadRequestError as e:
+            raise LLMAPIError(
+                str(e),
+                status_code=getattr(e, "status_code", 400),
+                response_body=getattr(e, "llm_response", None),
+            ) from e
+        except litellm.Timeout as e:
+            raise LLMAPIError(f"Request timed out: {e}") from e
+        except litellm.APIError as e:
+            raise LLMAPIError(
+                str(e),
+                status_code=getattr(e, "status_code", None),
+                response_body=getattr(e, "llm_response", None),
+            ) from e
+        except Exception as e:
+            raise LLMAPIError(f"litellm error: {e}") from e
 
-        data = response.json()
-
-        # Extract content from response
         try:
-            choice = data["choices"][0]
-            content = choice["message"]["content"]
-        except (KeyError, IndexError) as e:
-            raise LLMAPIError(f"Unexpected response format: {data}") from e
+            choice = response.choices[0]
+            content = choice.message.content
+        except (AttributeError, IndexError, TypeError) as e:
+            raise LLMAPIError(f"Unexpected response format from LLM provider: {e}") from e
 
         # Parse JSON if structured output was requested
         if schema and isinstance(content, str):
@@ -253,156 +222,13 @@ class OpenAIProvider(BaseLLMProvider):
             except json.JSONDecodeError as e:
                 raise LLMAPIError(f"Failed to parse JSON response: {content}") from e
 
+        usage = response.usage
         return {
             "content": content,
-            "model": data.get("model"),
-            "usage": data.get("usage"),
-        }
-
-
-class AnthropicProvider(BaseLLMProvider):
-    """Anthropic Claude LLM provider."""
-
-    DEFAULT_BASE_URL = "https://api.anthropic.com"
-    DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
-    API_VERSION = "2023-06-01"
-
-    def __init__(
-        self,
-        api_key: str | None = None,
-        model: str | None = None,
-        base_url: str | None = None,
-        timeout: float = 120.0,
-    ):
-        """Initialize Anthropic provider.
-
-        Args:
-            api_key: API key (defaults to ANTHROPIC_API_KEY env var)
-            model: Model name (defaults to claude-3-5-sonnet)
-            base_url: API base URL
-            timeout: Request timeout
-        """
-        # Resolve API key
-        resolved_key = api_key or os.getenv("ANTHROPIC_API_KEY")
-        if not resolved_key:
-            raise LLMConfigError(
-                "Anthropic API key is required. "
-                "Set ANTHROPIC_API_KEY environment variable or pass api_key."
-            )
-
-        super().__init__(
-            api_key=resolved_key,
-            model=model or self.DEFAULT_MODEL,
-            base_url=base_url or self.DEFAULT_BASE_URL,
-            timeout=timeout,
-        )
-
-    def _get_headers(self) -> dict[str, str]:
-        """Get headers for Anthropic API requests."""
-        return {
-            "Content-Type": "application/json",
-            "X-Api-Key": self.api_key or "",
-            "anthropic-version": self.API_VERSION,
-        }
-
-    def complete(
-        self,
-        messages: list[dict[str, Any]],
-        schema: dict[str, Any] | None = None,
-        temperature: float = 0.0,
-    ) -> dict[str, Any]:
-        """Send completion request to Anthropic API.
-
-        Args:
-            messages: List of message dicts
-            schema: Optional JSON schema for structured output (beta feature)
-            temperature: Sampling temperature
-
-        Returns:
-            Response dict with 'content' containing the response
-        """
-        if not self.model:
-            raise LLMConfigError("Model name is required")
-
-        # Convert OpenAI-style messages to Anthropic format
-        system_message = None
-        anthropic_messages = []
-
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-
-            if role == "system":
-                system_message = content
-            else:
-                anthropic_messages.append({
-                    "role": role,
-                    "content": content,
-                })
-
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "messages": anthropic_messages,
-            "temperature": temperature,
-            "max_tokens": 4096,
-        }
-
-        if system_message:
-            payload["system"] = system_message
-
-        # Add structured output via tools if schema provided
-        if schema:
-            # Use tools beta feature for structured output
-            tool_name = "structured_output"
-            payload["tools"] = [{
-                "name": tool_name,
-                "description": "Structured output format",
-                "input_schema": schema,
-            }]
-            payload["tool_choice"] = {"type": "tool", "name": tool_name}
-
-        try:
-            response = self.client.post("/v1/messages", json=payload)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise LLMAPIError(
-                f"Anthropic API error: {e.response.status_code}",
-                status_code=e.response.status_code,
-                response_body=e.response.text,
-            ) from e
-        except httpx.RequestError as e:
-            raise LLMAPIError(f"Request failed: {e}") from e
-
-        data = response.json()
-
-        # Extract content from response
-        try:
-            content_blocks = data["content"]
-
-            # Handle tool use for structured output
-            if schema:
-                for block in content_blocks:
-                    if block.get("type") == "tool_use":
-                        content = block.get("input", {})
-                        break
-                else:
-                    raise LLMAPIError(f"Expected tool_use in response: {data}")
-            else:
-                # Concatenate text blocks
-                content = "".join(
-                    block.get("text", "")
-                    for block in content_blocks
-                    if block.get("type") == "text"
-                )
-        except (KeyError, IndexError) as e:
-            raise LLMAPIError(f"Unexpected response format: {data}") from e
-
-        return {
-            "content": content,
-            "model": data.get("model"),
+            "model": response.model,
             "usage": {
-                "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
-                "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
+                "prompt_tokens": usage.prompt_tokens if usage else 0,
+                "completion_tokens": usage.completion_tokens if usage else 0,
             },
         }
 
@@ -421,8 +247,9 @@ def create_provider(
     3. Defaults (OpenAI with gpt-4o-mini)
 
     Args:
-        provider: Provider name ('openai', 'anthropic', 'local')
-        model: Model name
+        provider: Provider name (e.g. 'openai', 'anthropic', 'local', or any
+            litellm-supported prefix like 'gemini', 'ollama', 'vertex_ai')
+        model: Model name (provider-prefixed names like 'openai/gpt-4o' also accepted)
         api_key: API key
         base_url: Custom base URL
 
@@ -438,26 +265,27 @@ def create_provider(
     resolved_api_key = api_key or os.getenv("FORMBRIDGE_API_KEY")
     resolved_base_url = base_url or os.getenv("FORMBRIDGE_API_BASE")
 
-    if resolved_provider in ("openai", "local"):
-        # For local models, use OpenAI-compatible interface
-        if resolved_provider == "local" and not resolved_base_url:
-            resolved_base_url = "http://localhost:11434/v1"  # Default Ollama endpoint
+    # For local models, default to Ollama endpoint and normalize /v1 suffix
+    if resolved_provider == "local":
+        if not resolved_base_url:
+            resolved_base_url = "http://localhost:11434"
+        elif resolved_base_url.endswith("/v1"):
+            resolved_base_url = resolved_base_url[:-3]
 
-        return OpenAIProvider(
-            api_key=resolved_api_key,
-            model=resolved_model,
-            base_url=resolved_base_url,
-        )
+    # Provider-specific API key resolution
+    if resolved_provider == "openai" and not resolved_api_key:
+        resolved_api_key = os.getenv("OPENAI_API_KEY")
+    elif resolved_provider == "anthropic" and not resolved_api_key:
+        resolved_api_key = os.getenv("ANTHROPIC_API_KEY")
 
-    elif resolved_provider == "anthropic":
-        return AnthropicProvider(
-            api_key=resolved_api_key or os.getenv("ANTHROPIC_API_KEY"),
-            model=resolved_model,
-            base_url=resolved_base_url,
-        )
+    config = LLMConfig(
+        provider=resolved_provider,
+        model=resolved_model,
+        api_key=resolved_api_key,
+        base_url=resolved_base_url,
+    )
 
-    else:
-        raise LLMConfigError(f"Unknown provider: {resolved_provider}")
+    return LiteLLMProvider(config=config)
 
 
 def load_config(

@@ -17,16 +17,14 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
 from formbridge.llm import (
-    AnthropicProvider,
     LLMAPIError,
     LLMConfig,
     LLMConfigError,
     LLMError,
-    OpenAIProvider,
+    LiteLLMProvider,
     create_provider,
     load_config,
 )
@@ -225,76 +223,20 @@ def mock_calc_response() -> dict[str, Any]:
     }
 
 
-def _make_openai_response(content: Any) -> dict[str, Any]:
-    """Create a mock OpenAI API response body."""
+def _mock_litellm_response(content: Any, model: str = "gpt-4o-mini") -> MagicMock:
+    """Create a mock litellm completion response."""
     if isinstance(content, dict):
         content_str = json.dumps(content)
     else:
         content_str = str(content)
-    return {
-        "id": "chatcmpl-test",
-        "object": "chat.completion",
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": content_str,
-                },
-                "finish_reason": "stop",
-            }
-        ],
-        "model": "gpt-4o-mini",
-        "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
-    }
-
-
-def _mock_httpx_response(status_code: int, json_body: Any = None, text: str = "") -> httpx.Response:
-    """Create a mock httpx.Response with a request instance set (needed for raise_for_status)."""
-    request = httpx.Request("POST", "https://mock.api.com/endpoint")
-    if json_body is not None:
-        resp = httpx.Response(status_code, json=json_body, request=request)
-    else:
-        resp = httpx.Response(status_code, text=text, request=request)
-    return resp
-
-
-def _make_anthropic_response(content: str) -> dict[str, Any]:
-    """Create a mock Anthropic API response body."""
-    return {
-        "id": "msg_test",
-        "type": "message",
-        "role": "assistant",
-        "content": [
-            {
-                "type": "text",
-                "text": content,
-            }
-        ],
-        "model": "claude-3-5-sonnet-20241022",
-        "stop_reason": "end_turn",
-        "usage": {"input_tokens": 100, "output_tokens": 50},
-    }
-
-
-def _make_anthropic_tool_response(tool_input: dict) -> dict[str, Any]:
-    """Create a mock Anthropic tool_use API response."""
-    return {
-        "id": "msg_test",
-        "type": "message",
-        "role": "assistant",
-        "content": [
-            {
-                "type": "tool_use",
-                "id": "toolu_test",
-                "name": "structured_output",
-                "input": tool_input,
-            }
-        ],
-        "model": "claude-3-5-sonnet-20241022",
-        "stop_reason": "tool_use",
-        "usage": {"input_tokens": 100, "output_tokens": 50},
-    }
+    mock_response = MagicMock()
+    mock_response.choices = [MagicMock()]
+    mock_response.choices[0].message.content = content_str
+    mock_response.model = model
+    mock_response.usage = MagicMock()
+    mock_response.usage.prompt_tokens = 100
+    mock_response.usage.completion_tokens = 50
+    return mock_response
 
 
 # =============================================================================
@@ -466,18 +408,18 @@ class TestLLMConfig:
 # =============================================================================
 
 
-class TestOpenAIProvider:
-    """Tests for OpenAI-compatible provider with mocked HTTP calls."""
+class TestLiteLLMProvider:
+    """Tests for LiteLLMProvider with mocked litellm.completion calls."""
 
     def test_complete_basic(self) -> None:
         """Test basic completion request."""
-        response_body = _make_openai_response("Hello, world!")
-
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(200, json_body=response_body),
+        with patch(
+            "litellm.completion",
+            return_value=_mock_litellm_response("Hello, world!"),
         ):
-            provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
+            provider = LiteLLMProvider(
+                config=LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test-key-123")
+            )
             result = provider.complete([{"role": "user", "content": "Hi"}])
 
         assert result["content"] == "Hello, world!"
@@ -485,169 +427,82 @@ class TestOpenAIProvider:
     def test_complete_with_schema(self) -> None:
         """Test completion with JSON schema enforcement."""
         json_content = {"mappings": [], "rules": []}
-        response_body = _make_openai_response(json_content)
 
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(200, json_body=response_body),
-        ) as mock_post:
-            provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
+        with patch(
+            "litellm.completion",
+            return_value=_mock_litellm_response(json_content),
+        ) as mock_completion:
+            provider = LiteLLMProvider(
+                config=LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test-key-123")
+            )
             result = provider.complete(
                 [{"role": "user", "content": "parse this"}],
                 schema={"type": "object", "properties": {}},
             )
 
-            # Verify schema was included in the request
-            call_kwargs = mock_post.call_args
-            payload = call_kwargs.kwargs.get("json") or call_kwargs[1].get("json")
-            assert "response_format" in payload
-            assert payload["response_format"]["type"] == "json_schema"
+            # Verify response_format was included in the kwargs
+            call_kwargs = mock_completion.call_args
+            assert "response_format" in call_kwargs.kwargs or "response_format" in call_kwargs[1]
+            rf = call_kwargs.kwargs.get("response_format") or call_kwargs[1].get("response_format")
+            assert rf["type"] == "json_schema"
 
         # Content should be parsed to dict when schema is present
         assert isinstance(result["content"], dict)
 
     def test_complete_handles_api_error(self) -> None:
         """Test handling of API errors."""
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(429, text="Rate limit exceeded"),
+        import litellm
+
+        with patch(
+            "litellm.completion",
+            side_effect=litellm.RateLimitError(
+                message="Rate limit exceeded",
+                llm_provider="openai",
+                model="gpt-4o-mini",
+            ),
         ):
-            provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
+            provider = LiteLLMProvider(
+                config=LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test-key-123")
+            )
 
             with pytest.raises(LLMAPIError) as exc_info:
                 provider.complete([{"role": "user", "content": "Hi"}])
 
             assert exc_info.value.status_code == 429
 
-    def test_complete_handles_network_error(self) -> None:
-        """Test handling of network errors."""
-        with patch.object(
-            httpx.Client, "post",
-            side_effect=httpx.ConnectError("Connection refused"),
+    def test_complete_handles_timeout(self) -> None:
+        """Test handling of timeout errors."""
+        import litellm
+
+        with patch(
+            "litellm.completion",
+            side_effect=litellm.Timeout(message="Request timed out", model="gpt-4o-mini", llm_provider="openai"),
         ):
-            provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
-
-            with pytest.raises(LLMAPIError, match="Request failed"):
-                provider.complete([{"role": "user", "content": "Hi"}])
-
-    def test_complete_handles_malformed_response(self) -> None:
-        """Test handling of malformed API responses."""
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(200, json_body={"invalid": "structure"}),
-        ):
-            provider = OpenAIProvider(api_key="test-key", model="gpt-4o-mini")
-
-            with pytest.raises(LLMAPIError):
-                provider.complete([{"role": "user", "content": "Hi"}])
-
-    def test_headers_include_auth(self) -> None:
-        """Test that auth header is set correctly."""
-        provider = OpenAIProvider(api_key="test-key-123", model="gpt-4o-mini")
-        headers = provider._get_headers()
-        assert headers["Authorization"] == "Bearer test-key-123"
-
-    def test_headers_no_auth_when_no_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test that auth header is omitted when no API key is set."""
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("FORMBRIDGE_API_KEY", raising=False)
-        provider = OpenAIProvider(api_key=None, model="llama3.1", base_url="http://localhost:11434/v1")
-        headers = provider._get_headers()
-        assert "Authorization" not in headers
-
-    def test_context_manager(self) -> None:
-        """Test using provider as context manager."""
-        with OpenAIProvider(api_key="test", model="gpt-4o-mini") as provider:
-            assert provider is not None
-
-
-class TestAnthropicProvider:
-    """Tests for Anthropic provider with mocked HTTP calls."""
-
-    def test_complete_basic(self) -> None:
-        """Test basic Anthropic completion."""
-        response_body = _make_anthropic_response("Hello from Claude!")
-
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(200, json_body=response_body),
-        ):
-            provider = AnthropicProvider(api_key="sk-ant-test")
-            result = provider.complete([{"role": "user", "content": "Hi"}])
-
-        assert result["content"] == "Hello from Claude!"
-
-    def test_system_message_separated(self) -> None:
-        """Test that system messages are separated from conversation."""
-        response_body = _make_anthropic_response("OK")
-
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(200, json_body=response_body),
-        ) as mock_post:
-            provider = AnthropicProvider(api_key="sk-ant-test")
-            provider.complete([
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Hi"},
-            ])
-
-            payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
-            # System should be a separate top-level field
-            assert "system" in payload
-            assert "You are helpful" in payload["system"]
-            # Only user message in messages list
-            assert len(payload["messages"]) == 1
-            assert payload["messages"][0]["role"] == "user"
-
-    def test_complete_with_schema_uses_tools(self) -> None:
-        """Test that schema enforcement uses Anthropic tools API."""
-        tool_response = _make_anthropic_tool_response({"result": "ok"})
-        schema = {"type": "object", "properties": {"result": {"type": "string"}}}
-
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(200, json_body=tool_response),
-        ) as mock_post:
-            provider = AnthropicProvider(api_key="sk-ant-test")
-            result = provider.complete(
-                [{"role": "user", "content": "test"}],
-                schema=schema,
+            provider = LiteLLMProvider(
+                config=LLMConfig(provider="openai", model="gpt-4o-mini", api_key="test-key-123")
             )
 
-            payload = mock_post.call_args.kwargs.get("json") or mock_post.call_args[1].get("json")
-            # Schema should be sent as a tool
-            assert "tools" in payload
-            assert payload["tools"][0]["name"] == "structured_output"
-
-        # Content should be the parsed tool input
-        assert result["content"] == {"result": "ok"}
-
-    def test_headers_include_api_key(self) -> None:
-        """Test Anthropic headers."""
-        provider = AnthropicProvider(api_key="sk-ant-test123")
-        headers = provider._get_headers()
-        assert headers["X-Api-Key"] == "sk-ant-test123"
-        assert headers["anthropic-version"] == "2023-06-01"
-
-    def test_handles_api_error(self) -> None:
-        """Test Anthropic API error handling."""
-        with patch.object(
-            httpx.Client, "post",
-            return_value=_mock_httpx_response(401, text="Invalid API key"),
-        ):
-            provider = AnthropicProvider(api_key="sk-ant-test")
-
-            with pytest.raises(LLMAPIError) as exc_info:
+            with pytest.raises(LLMAPIError, match="timed out"):
                 provider.complete([{"role": "user", "content": "Hi"}])
 
-            assert exc_info.value.status_code == 401
+    def test_complete_handles_auth_error(self) -> None:
+        """Test handling of authentication errors."""
+        import litellm
 
-    def test_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Test that Anthropic requires an API key."""
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("FORMBRIDGE_API_KEY", raising=False)
-        with pytest.raises(LLMConfigError):
-            AnthropicProvider(api_key=None)
+        with patch(
+            "litellm.completion",
+            side_effect=litellm.AuthenticationError(
+                message="Invalid API key",
+                llm_provider="openai",
+                model="gpt-4o-mini",
+            ),
+        ):
+            provider = LiteLLMProvider(
+                config=LLMConfig(provider="openai", model="gpt-4o-mini", api_key="bad-key")
+            )
+
+            with pytest.raises(LLMConfigError):
+                provider.complete([{"role": "user", "content": "Hi"}])
 
 
 class TestProviderFactory:
@@ -655,26 +510,28 @@ class TestProviderFactory:
 
     def test_create_openai_provider(self) -> None:
         """Test creating an OpenAI provider."""
-        provider = create_provider(provider="openai", api_key="test")
-        assert isinstance(provider, OpenAIProvider)
+        provider = create_provider(provider="openai", api_key="test-key")
+        assert isinstance(provider, LiteLLMProvider)
 
     def test_create_anthropic_provider(self) -> None:
         """Test creating an Anthropic provider."""
-        provider = create_provider(provider="anthropic", api_key="test")
-        assert isinstance(provider, AnthropicProvider)
+        provider = create_provider(provider="anthropic", api_key="test-key")
+        assert isinstance(provider, LiteLLMProvider)
 
     def test_create_local_provider(self) -> None:
-        """Test that 'local' creates an OpenAI-compatible provider."""
+        """Test that 'local' creates a LiteLLMProvider with Ollama defaults."""
+        provider = create_provider(provider="local")
+        assert isinstance(provider, LiteLLMProvider)
+        assert provider.config.base_url == "http://localhost:11434"
+
+    def test_create_local_provider_normalizes_v1(self) -> None:
+        """Test that 'local' provider strips /v1 from base_url for litellm ollama."""
         provider = create_provider(
             provider="local",
             base_url="http://localhost:11434/v1",
         )
-        assert isinstance(provider, OpenAIProvider)
-
-    def test_unknown_provider_raises(self) -> None:
-        """Test that unknown provider name raises LLMConfigError."""
-        with pytest.raises(LLMConfigError, match="Unknown provider"):
-            create_provider(provider="unknown-provider")
+        assert isinstance(provider, LiteLLMProvider)
+        assert provider.config.base_url == "http://localhost:11434"
 
 
 # =============================================================================
@@ -1016,16 +873,16 @@ class TestParser:
         # LLM will be called twice: once for mapping, once for calc rules
         call_count = [0]
         responses = [
-            _make_openai_response(mock_mapping_response),
-            _make_openai_response(mock_calc_response),
+            _mock_litellm_response(mock_mapping_response),
+            _mock_litellm_response(mock_calc_response),
         ]
 
-        def mock_post(self, url, **kwargs):
+        def mock_completion(**kwargs):
             idx = min(call_count[0], len(responses) - 1)
             call_count[0] += 1
-            return _mock_httpx_response(200, json_body=responses[idx])
+            return responses[idx]
 
-        with patch.object(httpx.Client, "post", mock_post):
+        with patch("litellm.completion", mock_completion):
             parser = Parser(
                 instructions_path=pdf,
                 schema=sample_schema,
@@ -1053,19 +910,19 @@ class TestParser:
 
         call_count = [0]
         responses = [
-            _make_openai_response(mock_mapping_response),
-            _make_openai_response(mock_calc_response),
+            _mock_litellm_response(mock_mapping_response),
+            _mock_litellm_response(mock_calc_response),
         ]
 
-        def mock_post(self, url, **kwargs):
+        def mock_completion(**kwargs):
             idx = min(call_count[0], len(responses) - 1)
             call_count[0] += 1
-            return _mock_httpx_response(200, json_body=responses[idx])
+            return responses[idx]
 
         # Use a custom cache dir to avoid polluting real cache
         cache_dir = tmp_path / "cache"
 
-        with patch.object(httpx.Client, "post", mock_post):
+        with patch("litellm.completion", mock_completion):
             with patch.object(InstructionCache, "__init__", lambda self, cache_dir=None: (
                 setattr(self, 'cache_dir', cache_dir or Path(str(tmp_path / "cache"))) or
                 self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1106,17 +963,17 @@ class TestParser:
         _create_test_instruction_pdf(pdf)
 
         responses = [
-            _make_openai_response(mock_mapping_response),
-            _make_openai_response(mock_calc_response),
+            _mock_litellm_response(mock_mapping_response),
+            _mock_litellm_response(mock_calc_response),
         ]
         call_idx = [0]
 
-        def mock_post(self, url, **kwargs):
+        def mock_completion(**kwargs):
             idx = min(call_idx[0], len(responses) - 1)
             call_idx[0] += 1
-            return _mock_httpx_response(200, json_body=responses[idx])
+            return responses[idx]
 
-        with patch.object(httpx.Client, "post", mock_post):
+        with patch("litellm.completion", mock_completion):
             parser = Parser(
                 instructions_path=pdf,
                 schema=sample_schema,
@@ -1200,17 +1057,17 @@ class TestParseCLI:
         output_path = tmp_path / "instructions.json"
 
         responses = [
-            _make_openai_response(mock_mapping_response),
-            _make_openai_response(mock_calc_response),
+            _mock_litellm_response(mock_mapping_response),
+            _mock_litellm_response(mock_calc_response),
         ]
         call_idx = [0]
 
-        def mock_post(self, url, **kwargs):
+        def mock_completion(**kwargs):
             idx = min(call_idx[0], len(responses) - 1)
             call_idx[0] += 1
-            return _mock_httpx_response(200, json_body=responses[idx])
+            return responses[idx]
 
-        with patch.object(httpx.Client, "post", mock_post):
+        with patch("litellm.completion", mock_completion):
             runner = CliRunner()
             result = runner.invoke(main, [
                 "--provider", "openai",
